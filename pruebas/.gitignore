@@ -1,0 +1,6 @@
+build/
+.gradle/
+target/
+vendor/
+composer.lock
+node_modules/

@@ -1,0 +1,6 @@
+{
+    "name": "tfm/prueba-php",
+    "require-dev": {
+        "phpunit/phpunit": "^11.5"
+    }
+}
