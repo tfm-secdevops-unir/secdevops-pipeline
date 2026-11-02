@@ -31,6 +31,17 @@ jobs:
       mongo: true
 ```
 
+| Entrada | Qué recibe |
+|---|---|
+| `proyectos-node` | Carpetas Node: `npm ci`, `npm test` y `npm run build` si existe. |
+| `proyectos-java` | Carpetas con `pom.xml` (`mvn verify`) o `gradlew` (`gradlew build`). |
+| `proyectos-php` | Carpetas con Composer y PHPUnit: `composer install` y `vendor/bin/phpunit`. |
+| `imagenes` | Contextos de `docker build`. |
+| `mongo` | Arranca `mongo:7` y define `MONGO_URL` en los proyectos Node. |
+| `node-version`, `java-version`, `php-version` | Versiones. Por defecto 22, 21 y 8.3. |
+
+Todas son opcionales, pero hace falta al menos un proyecto o una imagen. `prueba.yml` ejecuta el pipeline contra los proyectos de `pruebas/` en cada push.
+
 ## Proteger el pipeline en cada proyecto
 
 1. Añade `.github/CODEOWNERS` con `/.github/` a nombre de al menos dos responsables del pipeline.
