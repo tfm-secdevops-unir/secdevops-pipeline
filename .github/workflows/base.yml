@@ -1,0 +1,89 @@
+name: base
+
+on:
+  workflow_call:
+    inputs:
+      proyectos-node:
+        description: 'Carpetas con proyectos Node, en JSON. Ejemplo: ["backend","frontend"]'
+        required: true
+        type: string
+      imagenes:
+        description: 'Contextos de docker build, en JSON. Ejemplo: ["backend","frontend"]'
+        required: true
+        type: string
+      mongo:
+        description: Arranca mongo:7 y define MONGO_URL en todos los proyectos Node
+        required: false
+        type: boolean
+        default: false
+      node-version:
+        required: false
+        type: string
+        default: '22'
+
+permissions:
+  contents: read
+
+jobs:
+  politica-ramas:
+    runs-on: ubuntu-latest
+    steps:
+      - name: main solo acepta PR desde release/* o hotfix/*
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        env:
+          RAMA: ${{ github.head_ref }}
+        run: |
+          case "$RAMA" in
+            release/*|hotfix/*) echo "Rama permitida: $RAMA" ;;
+            *) echo "::error::A main solo se integra desde release/* o hotfix/*"; exit 1 ;;
+          esac
+
+  node:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        proyecto: ${{ fromJSON(inputs.proyectos-node) }}
+    services:
+      mongo:
+        # Con imagen vacía GitHub no arranca el servicio.
+        image: ${{ inputs.mongo && 'mongo:7' || '' }}
+        ports: ['27017:27017']
+    defaults:
+      run:
+        working-directory: ${{ matrix.proyecto }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.proyecto }}/package-lock.json
+      - run: npm ci
+      - run: npm test
+        env:
+          MONGO_URL: ${{ inputs.mongo && 'mongodb://127.0.0.1:27017/test' || '' }}
+      - run: npm run build --if-present
+
+  docker:
+    needs: [politica-ramas, node]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        contexto: ${{ fromJSON(inputs.imagenes) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - run: docker build "$CONTEXTO"
+        env:
+          CONTEXTO: ${{ matrix.contexto }}
+
+  # Check único para exigir en las reglas de rama: su nombre no cambia con la matriz.
+  resultado:
+    if: always()
+    needs: [politica-ramas, node, docker]
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "$CORRECTO" = "true"
+        env:
+          CORRECTO: ${{ !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') && !contains(needs.*.result, 'skipped') }}
