@@ -1,0 +1,21 @@
+name: prueba
+
+on: push
+
+permissions:
+  contents: read
+
+jobs:
+  base:
+    uses: ./.github/workflows/base.yml
+    with:
+      proyectos-node: '["pruebas/node"]'
+      proyectos-java: '["pruebas/maven","pruebas/gradle"]'
+      proyectos-php: '["pruebas/php"]'
+      imagenes: '["pruebas/docker"]'
+
+  # Un proyecto con un solo lenguaje: los demás jobs se omiten y el resultado debe seguir en verde.
+  solo-php:
+    uses: ./.github/workflows/base.yml
+    with:
+      proyectos-php: '["pruebas/php"]'
