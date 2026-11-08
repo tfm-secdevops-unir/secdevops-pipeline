@@ -19,3 +19,26 @@ jobs:
     uses: ./.github/workflows/base.yml
     with:
       proyectos-php: '["pruebas/php"]'
+
+  # Casos de lógica de la puerta (E01 a E04, P01 a P03) y reglas R1 a R10.
+  puerta:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 scripts/test_puerta.py
+
+  # El pipeline seguro sobre los mismos proyectos, sin cambiar la plantilla.
+  seguro:
+    uses: ./.github/workflows/seguro.yml
+    permissions:
+      contents: read
+      id-token: write
+      security-events: write
+    with:
+      proyectos-node: '["pruebas/node"]'
+      proyectos-java: '["pruebas/maven","pruebas/gradle"]'
+      proyectos-php: '["pruebas/php"]'
+      imagenes: '["pruebas/docker","pruebas/php","pruebas/maven"]'
+      semgrep-config: p/java p/php p/javascript p/nodejs p/owasp-top-ten

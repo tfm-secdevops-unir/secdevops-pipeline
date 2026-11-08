@@ -1,0 +1,693 @@
+name: seguro
+
+# Pipeline seguro: los mismos pasos que base.yml (política de ramas, pruebas y
+# construcción) más los controles de seguridad y una puerta de decisión.
+# Las herramientas solo generan informes; la puerta (scripts/puerta.py) aplica
+# la política R1 a R10 de POLITICA-SEGURIDAD.md.
+
+on:
+  workflow_call:
+    inputs:
+      proyectos-node:
+        description: 'Carpetas con proyectos Node, en JSON. Ejemplo: ["backend","frontend"]'
+        required: false
+        type: string
+        default: '[]'
+      proyectos-java:
+        description: 'Carpetas con proyectos Maven (pom.xml) o Gradle (gradlew), en JSON'
+        required: false
+        type: string
+        default: '[]'
+      proyectos-php:
+        description: 'Carpetas con proyectos PHP con Composer y PHPUnit, en JSON'
+        required: false
+        type: string
+        default: '[]'
+      imagenes:
+        description: 'Contextos de docker build, en JSON. Ejemplo: ["backend","frontend"]'
+        required: false
+        type: string
+        default: '[]'
+      mongo:
+        description: Arranca mongo:7 y define MONGO_URL en todos los proyectos Node
+        required: false
+        type: boolean
+        default: false
+      node-version:
+        required: false
+        type: string
+        default: '22'
+      java-version:
+        required: false
+        type: string
+        default: '21'
+      php-version:
+        required: false
+        type: string
+        default: '8.3'
+      modo:
+        description: 'operativo: deciden las herramientas principales y se detiene en la primera puerta que bloquea. completo: añade las alternativas y ejecuta todas las etapas'
+        required: false
+        type: string
+        default: operativo
+      semgrep-config:
+        description: Paquetes de reglas de Semgrep, separados por espacios
+        required: false
+        type: string
+        default: p/javascript p/nodejs p/expressjs p/owasp-top-ten
+      excepciones:
+        description: Ruta del archivo de excepciones en el proyecto
+        required: false
+        type: string
+        default: .github/excepciones.yml
+      lideres-seguridad:
+        description: Usuarios de GitHub que pueden aprobar excepciones, separados por comas
+        required: false
+        type: string
+        default: ''
+      fecha-referencia:
+        description: Fecha (AAAA-MM-DD) con la que se valida la caducidad de las excepciones. Vacía, la del día
+        required: false
+        type: string
+        default: ''
+      compose:
+        description: Archivo de Docker Compose del staging efímero. Vacío, no hay staging ni DAST
+        required: false
+        type: string
+        default: ''
+      staging-url:
+        description: URL que analiza OWASP ZAP en el staging
+        required: false
+        type: string
+        default: http://localhost:8080
+      staging-salud:
+        description: URL que debe responder 200 antes de lanzar ZAP
+        required: false
+        type: string
+        default: http://localhost:8080/api/health
+      simular:
+        description: 'Solo para los casos de lógica de la puerta: fallo-herramienta (P02) o informe-invalido (P03)'
+        required: false
+        type: string
+        default: ''
+    secrets:
+      DOCKERHUB_USUARIO:
+        required: false
+      DOCKERHUB_TOKEN:
+        required: false
+      NVD_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+
+env:
+  # Herramientas fijadas por versión y digest: una etiqueta puede reescribirse.
+  GITLEAKS: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+  TRUFFLEHOG: trufflesecurity/trufflehog:3.99.8@sha256:674b2f187620a19df77f44cf9a7d77efcc581a5662accef2f2739cbb46ba4a3a
+  SEMGREP: semgrep/semgrep:1.183.0@sha256:2e45517a85e13a9cca14a2a00df6bb48affd66b8ebfae1b0991cd57578362fb0
+  TRIVY: aquasec/trivy:0.76.2@sha256:8f6bb947dbc528902e11f2f5be52f7b519f6a39d5d148f41166f2040499768fb
+  GRYPE: anchore/grype:v0.121.1@sha256:6b06708b036f74b2cd70e94b706b4586af96d1932e6ac46255940b2e39dd44a9
+  DEPENDENCY_CHECK: owasp/dependency-check:13.0.0@sha256:0e8f69ad5b00d62000937f4e57189812343f6903d9c83ee712012d51542a020a
+  ZAP: ghcr.io/zaproxy/zaproxy:2.17.0@sha256:9624669db72f54d86c4b46a7064518bd9bf79d8c61a4c31befa9923489f328af
+
+jobs:
+  # Un workflow reutilizable no conoce su propio commit en el contexto github.
+  # El token OIDC del job sí lo incluye (job_workflow_sha), y con él se descargan
+  # los scripts de la puerta en la misma versión que este archivo.
+  plantilla:
+    runs-on: ubuntu-24.04
+    permissions:
+      id-token: write
+    outputs:
+      repo: ${{ steps.version.outputs.repo }}
+      sha: ${{ steps.version.outputs.sha }}
+    steps:
+      - id: version
+        shell: python
+        run: |
+          import base64, json, os, urllib.request
+          peticion = urllib.request.Request(
+              os.environ['ACTIONS_ID_TOKEN_REQUEST_URL'] + '&audience=secdevops-pipeline',
+              headers={'Authorization': 'Bearer ' + os.environ['ACTIONS_ID_TOKEN_REQUEST_TOKEN']})
+          token = json.load(urllib.request.urlopen(peticion))['value']
+          carga = token.split('.')[1]
+          claims = json.loads(base64.urlsafe_b64decode(carga + '=' * (-len(carga) % 4)))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as salida:
+              salida.write('repo=' + claims['job_workflow_ref'].split('/.github/')[0] + '\n')
+              salida.write('sha=' + claims['job_workflow_sha'] + '\n')
+          print(claims['job_workflow_ref'], claims['job_workflow_sha'])
+
+  politica-ramas:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: main solo acepta PR desde release/* o hotfix/*
+        if: github.event_name == 'pull_request' && github.base_ref == 'main'
+        env:
+          RAMA: ${{ github.head_ref }}
+        run: |
+          case "$RAMA" in
+            release/*|hotfix/*) echo "Rama permitida: $RAMA" ;;
+            *) echo "::error::A main solo se integra desde release/* o hotfix/*"; exit 1 ;;
+          esac
+
+  # ---------- Puerta previa: secretos, código y dependencias ----------
+
+  secretos:
+    needs: plantilla
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: app
+          fetch-depth: 0 # historial completo: un secreto borrado sigue en los commits anteriores
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plantilla.outputs.repo }}
+          ref: ${{ needs.plantilla.outputs.sha }}
+          path: plantilla
+          persist-credentials: false
+      - name: Gitleaks (principal)
+        env:
+          SIMULAR: ${{ inputs.simular }}
+        run: |
+          mkdir -p informes
+          extra=""
+          [ "$SIMULAR" = fallo-herramienta ] && extra="--opcion-inexistente"
+          inicio=$(date +%s.%N)
+          set +e
+          # --log-opts=HEAD: solo el historial del commit analizado. Por defecto Gitleaks usa --all,
+          # y fetch-depth: 0 trae todas las ramas remotas, también las de otros cambios.
+          docker run --rm -v "$PWD/app:/repo" -v "$PWD/informes:/out" "$GITLEAKS" git /repo --log-opts=HEAD \
+            --redact --exit-code 2 --no-banner --report-format json --report-path /out/gitleaks.json $extra
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py gitleaks --version 8.30.1 --informe informes/gitleaks.json \
+            --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-gitleaks.json
+          [ "$SIMULAR" = informe-invalido ] && echo '{"incompleto":' > informes/resumen-gitleaks.json
+          true
+      - name: TruffleHog (alternativa, sin verificación)
+        if: inputs.modo == 'completo'
+        run: |
+          inicio=$(date +%s.%N)
+          set +e
+          docker run --rm -v "$PWD/app:/repo" "$TRUFFLEHOG" git file:///repo --branch HEAD --no-verification --no-update \
+            --json --fail > informes/trufflehog-crudo.json
+          codigo=$?
+          set -e
+          # Se quita el secreto en claro antes de conservar el informe.
+          jq -c 'del(.Raw, .RawV2)' informes/trufflehog-crudo.json > informes/trufflehog.json || true
+          rm -f informes/trufflehog-crudo.json
+          python3 plantilla/scripts/normalizar.py trufflehog --version 3.99.8 --informe informes/trufflehog.json \
+            --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-trufflehog.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: informes-secretos
+          path: informes/
+
+  sast:
+    needs: plantilla
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plantilla.outputs.repo }}
+          ref: ${{ needs.plantilla.outputs.sha }}
+          path: plantilla
+          persist-credentials: false
+      - name: Semgrep
+        env:
+          CONFIG: ${{ inputs.semgrep-config }}
+        run: |
+          mkdir -p informes
+          reglas=()
+          for c in $CONFIG; do reglas+=(--config "$c"); done
+          inicio=$(date +%s.%N)
+          set +e
+          # --disable-nosem: un comentario nosemgrep no puede saltarse la política; las excepciones van en excepciones.yml.
+          docker run --rm -v "$PWD/app:/src" -w /src -v "$PWD/informes:/out" "$SEMGREP" semgrep scan "${reglas[@]}" \
+            --metrics=off --disable-nosem --json --output /out/semgrep.json --sarif-output /out/semgrep.sarif -q .
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py semgrep --version 1.183.0 --informe informes/semgrep.json \
+            --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-semgrep.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: informes-sast
+          path: informes/
+
+  dependencias:
+    needs: plantilla
+    runs-on: ubuntu-24.04
+    env:
+      NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: app
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plantilla.outputs.repo }}
+          ref: ${{ needs.plantilla.outputs.sha }}
+          path: plantilla
+          persist-credentials: false
+      - id: fecha
+        run: echo "hoy=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/trivy
+          key: trivy-db-${{ steps.fecha.outputs.hoy }}
+          restore-keys: trivy-db-
+      - name: Trivy fs (principal; solo dependencias de producción)
+        run: |
+          mkdir -p informes ~/.cache/trivy
+          inicio=$(date +%s.%N)
+          set +e
+          docker run --rm -v "$PWD/app:/repo" -w /repo -v "$PWD/informes:/out" -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            "$TRIVY" fs --scanners vuln --format json --output /out/trivy-fs.json --quiet .
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py trivy-fs --version 0.76.2 --informe informes/trivy-fs.json \
+            --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-trivy-fs.json
+          docker run --rm -v "$PWD/informes:/out" "$TRIVY" convert --format sarif --output /out/trivy-fs.sarif /out/trivy-fs.json || true
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        if: inputs.modo == 'completo'
+        with:
+          path: ~/.cache/dependency-check
+          key: dependency-check-${{ steps.fecha.outputs.hoy }}
+          restore-keys: dependency-check-
+      - name: OWASP Dependency-Check (alternativa)
+        if: inputs.modo == 'completo'
+        timeout-minutes: 90
+        run: |
+          mkdir -p ~/.cache/dependency-check && chmod -R 777 ~/.cache/dependency-check informes
+          clave=()
+          [ -n "$NVD_API_KEY" ] && clave=(--nvdApiKey "$NVD_API_KEY")
+          inicio=$(date +%s.%N)
+          set +e
+          docker run --rm -v "$PWD/app:/src:ro" -v "$PWD/informes:/report" \
+            -v "$HOME/.cache/dependency-check:/usr/share/dependency-check/data" "$DEPENDENCY_CHECK" \
+            --scan /src --project app --format JSON --out /report "${clave[@]}" \
+            --nodeAuditSkipDevDependencies --nodePackageSkipDevDependencies --disableYarnAudit --disablePnpmAudit \
+            --exclude '**/node_modules/**' --exclude '**/.git/**'
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py dependency-check --version 13.0.0 \
+            --informe informes/dependency-check-report.json --codigo "$codigo" --inicio "$inicio" \
+            --salida informes/resumen-dependency-check.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: informes-dependencias
+          path: informes/
+
+  puerta-previa:
+    needs: [plantilla, secretos, sast, dependencias]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    # En modo completo la decisión la toma la puerta final, que reúne todas las etapas.
+    continue-on-error: ${{ inputs.modo == 'completo' }}
+    outputs:
+      decision: ${{ steps.salida.outputs.decision }}
+    steps:
+      - &checkout-app
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: app
+          persist-credentials: false
+      - &checkout-plantilla
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ needs.plantilla.outputs.repo }}
+          ref: ${{ needs.plantilla.outputs.sha }}
+          path: plantilla
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: informes-*
+          path: resumenes
+      - &excepciones
+        name: Excepciones
+        env:
+          ARCHIVO: app/${{ inputs.excepciones }}
+        run: |
+          if [ -f "$ARCHIVO" ]; then
+            yq -o=json '.' "$ARCHIVO" > excepciones.json || echo '[no se pudo leer' > excepciones.json
+          fi
+      - name: Puerta previa
+        env:
+          LIDERES: ${{ inputs.lideres-seguridad }}
+          FECHA: ${{ inputs.fecha-referencia }}
+          MODO: ${{ inputs.modo }}
+        run: |
+          python3 plantilla/scripts/puerta.py --resumenes resumenes --esperados gitleaks semgrep trivy-fs \
+            --excepciones excepciones.json --lideres "$LIDERES" --fecha "$FECHA" --fase previa --modo "$MODO" \
+            --salida decision-previa.json
+      - id: salida
+        if: always()
+        run: echo "decision=$(jq -r .decision decision-previa.json 2>/dev/null || echo indeterminado)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: decision-previa
+          path: decision-previa.json
+
+  # ---------- Construcción y pruebas (iguales que en base.yml) ----------
+
+  node:
+    needs: puerta-previa
+    if: >-
+      !cancelled() && inputs.proyectos-node != '[]' &&
+      (inputs.modo == 'completo' || contains(fromJSON('["pasar","avisar"]'), needs.puerta-previa.outputs.decision))
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        proyecto: ${{ fromJSON(inputs.proyectos-node) }}
+    services:
+      mongo:
+        image: ${{ inputs.mongo && 'mongo:7' || '' }}
+        ports: ['27017:27017']
+    defaults:
+      run:
+        working-directory: ${{ matrix.proyecto }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: npm
+          cache-dependency-path: ${{ matrix.proyecto }}/package-lock.json
+      - run: npm ci
+      - run: npm test
+        env:
+          MONGO_URL: ${{ inputs.mongo && 'mongodb://127.0.0.1:27017/test' || '' }}
+      - run: npm run build --if-present
+
+  java:
+    needs: puerta-previa
+    if: >-
+      !cancelled() && inputs.proyectos-java != '[]' &&
+      (inputs.modo == 'completo' || contains(fromJSON('["pasar","avisar"]'), needs.puerta-previa.outputs.decision))
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        proyecto: ${{ fromJSON(inputs.proyectos-java) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.proyecto }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: ${{ inputs.java-version }}
+          cache: ${{ hashFiles(format('{0}/pom.xml', matrix.proyecto)) != '' && 'maven' || 'gradle' }}
+          cache-dependency-path: |
+            ${{ matrix.proyecto }}/**/pom.xml
+            ${{ matrix.proyecto }}/**/*.gradle*
+            ${{ matrix.proyecto }}/**/gradle-wrapper.properties
+      - run: |
+          if [ -f pom.xml ]; then
+            mvn -B verify
+          else
+            sh ./gradlew build --no-daemon
+          fi
+
+  php:
+    needs: puerta-previa
+    if: >-
+      !cancelled() && inputs.proyectos-php != '[]' &&
+      (inputs.modo == 'completo' || contains(fromJSON('["pasar","avisar"]'), needs.puerta-previa.outputs.decision))
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        proyecto: ${{ fromJSON(inputs.proyectos-php) }}
+    defaults:
+      run:
+        working-directory: ${{ matrix.proyecto }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # 2.40.0
+        with:
+          php-version: ${{ inputs.php-version }}
+          coverage: none
+      - run: composer install --no-interaction
+      - run: vendor/bin/phpunit
+
+  # ---------- Imagen y configuración ----------
+
+  imagen:
+    needs: [plantilla, puerta-previa, node, java, php]
+    if: >-
+      !cancelled() && inputs.imagenes != '[]' &&
+      (inputs.modo == 'completo' || contains(fromJSON('["pasar","avisar"]'), needs.puerta-previa.outputs.decision)) &&
+      needs.node.result != 'failure' && needs.java.result != 'failure' && needs.php.result != 'failure'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        contexto: ${{ fromJSON(inputs.imagenes) }}
+    env:
+      CONTEXTO: ${{ matrix.contexto }}
+      IMAGEN: seguro/imagen-${{ strategy.job-index }}:ci
+      DOCKERHUB_USUARIO: ${{ secrets.DOCKERHUB_USUARIO }}
+    steps:
+      - *checkout-app
+      - *checkout-plantilla
+      - id: fecha
+        run: echo "hoy=$(date -u +%F)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/trivy
+            ~/.cache/grype
+          key: escaneres-db-${{ steps.fecha.outputs.hoy }}
+          restore-keys: escaneres-db-
+      - name: Construir la imagen (no se publica)
+        run: docker build -t "$IMAGEN" "app/$CONTEXTO"
+      - name: Trivy image (principal)
+        run: |
+          mkdir -p informes ~/.cache/trivy
+          inicio=$(date +%s.%N)
+          set +e
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/informes:/out" \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY" image --scanners vuln --format json \
+            --output /out/trivy-image.json --quiet "$IMAGEN"
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py trivy-image --version 0.76.2 --objetivo "$CONTEXTO" \
+            --informe informes/trivy-image.json --codigo "$codigo" --inicio "$inicio" \
+            --salida informes/resumen-trivy-image.json
+          docker run --rm -v "$PWD/informes:/out" "$TRIVY" convert --format sarif --output /out/trivy-image.sarif /out/trivy-image.json || true
+      - name: SBOM CycloneDX
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD/informes:/out" \
+            -v "$HOME/.cache/trivy:/root/.cache/trivy" "$TRIVY" image --format cyclonedx \
+            --output /out/sbom.cdx.json --quiet "$IMAGEN"
+      - name: Trivy config (Dockerfile)
+        run: |
+          inicio=$(date +%s.%N)
+          set +e
+          docker run --rm -v "$PWD/app:/repo" -w /repo -v "$PWD/informes:/out" -v "$HOME/.cache/trivy:/root/.cache/trivy" \
+            "$TRIVY" config --misconfig-scanners dockerfile --format json --output /out/trivy-config.json --quiet "$CONTEXTO"
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py trivy-config --version 0.76.2 --objetivo "$CONTEXTO" \
+            --informe informes/trivy-config.json --codigo "$codigo" --inicio "$inicio" \
+            --salida informes/resumen-trivy-config.json
+      - name: Usuario efectivo y soporte del entorno (docker inspect)
+        run: |
+          inicio=$(date +%s.%N)
+          set +e
+          docker inspect "$IMAGEN" > informes/docker-inspect.json
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py docker-inspect --objetivo "$CONTEXTO" \
+            --fin-de-vida plantilla/politica/fin-de-vida.json --informe informes/docker-inspect.json \
+            --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-docker-inspect.json
+      - name: Grype (alternativa)
+        if: inputs.modo == 'completo'
+        run: |
+          mkdir -p ~/.cache/grype
+          inicio=$(date +%s.%N)
+          set +e
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$HOME/.cache/grype:/root/.cache/grype" \
+            "$GRYPE" "docker:$IMAGEN" -o json -q > informes/grype.json
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py grype --version 0.121.1 --objetivo "$CONTEXTO" \
+            --informe informes/grype.json --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-grype.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: informes-imagen-${{ strategy.job-index }}
+          path: informes/
+
+  # ---------- Decisión ----------
+
+  puerta:
+    needs: [plantilla, secretos, sast, dependencias, puerta-previa, imagen]
+    if: >-
+      !cancelled() &&
+      (inputs.modo == 'completo' || contains(fromJSON('["pasar","avisar"]'), needs.puerta-previa.outputs.decision))
+    runs-on: ubuntu-24.04
+    outputs:
+      decision: ${{ steps.salida.outputs.decision }}
+    steps:
+      - *checkout-app
+      - *checkout-plantilla
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: informes-*
+          path: resumenes
+      - *excepciones
+      - name: Puerta
+        env:
+          IMAGENES: ${{ inputs.imagenes }}
+          LIDERES: ${{ inputs.lideres-seguridad }}
+          FECHA: ${{ inputs.fecha-referencia }}
+          MODO: ${{ inputs.modo }}
+        run: |
+          esperados=(gitleaks semgrep trivy-fs)
+          while read -r c; do
+            [ -n "$c" ] && esperados+=("trivy-image:$c" "trivy-config:$c" "docker-inspect:$c")
+          done < <(echo "$IMAGENES" | jq -r '.[]')
+          python3 plantilla/scripts/puerta.py --resumenes resumenes --esperados "${esperados[@]}" \
+            --excepciones excepciones.json --lideres "$LIDERES" --fecha "$FECHA" --fase final --modo "$MODO" \
+            --salida decision.json
+      - id: salida
+        if: always()
+        run: echo "decision=$(jq -r .decision decision.json 2>/dev/null || echo indeterminado)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: decision-final
+          path: decision.json
+
+  # ---------- Después de la decisión: staging efímero y DAST (solo informa, R10) ----------
+
+  dast:
+    needs: [plantilla, puerta]
+    if: ${{ !cancelled() && inputs.compose != '' && contains(fromJSON('["pasar","avisar"]'), needs.puerta.outputs.decision) }}
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - *checkout-app
+      - *checkout-plantilla
+      - name: Levantar el staging dentro del ejecutor
+        env:
+          COMPOSE: ${{ inputs.compose }}
+          SALUD: ${{ inputs.staging-salud }}
+        run: |
+          docker compose -f "app/$COMPOSE" up -d --build
+          for _ in $(seq 1 60); do
+            [ "$(curl -s -o /dev/null -w '%{http_code}' "$SALUD")" = 200 ] && { echo "Staging listo: $SALUD responde 200"; exit 0; }
+            sleep 2
+          done
+          docker compose -f "app/$COMPOSE" logs
+          exit 1
+      - name: OWASP ZAP baseline
+        env:
+          URL: ${{ inputs.staging-url }}
+        run: |
+          mkdir -p informes && chmod 777 informes
+          inicio=$(date +%s.%N)
+          set +e
+          docker run --rm --network host -v "$PWD/informes:/zap/wrk:rw" "$ZAP" zap-baseline.py -t "$URL" \
+            -J zap.json -r zap.html -I
+          codigo=$?
+          set -e
+          python3 plantilla/scripts/normalizar.py zap --version 2.17.0 --objetivo "$URL" --informe informes/zap.json \
+            --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-zap.json
+      - name: Apagar el staging
+        if: always()
+        env:
+          COMPOSE: ${{ inputs.compose }}
+        run: docker compose -f "app/$COMPOSE" down -v
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: informes-dast
+          path: informes/
+
+  # Conserva todos los informes en un único artefacto, también si la puerta bloquea o algo falla.
+  evidencias:
+    needs: [secretos, sast, dependencias, puerta-previa, imagen, puerta, dast]
+    if: always()
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # solo para enviar los SARIF a la pestaña Security
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: evidencias
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidencias
+          path: evidencias/
+          retention-days: 90
+      - name: Reunir SARIF
+        # Cada SARIF lleva su propia categoría (herramienta y objetivo): code scanning
+        # rechaza varias ejecuciones con la misma categoría en un mismo envío.
+        shell: python
+        run: |
+          import glob, json, os
+          os.makedirs('sarif', exist_ok=True)
+          for ruta in glob.glob('evidencias/**/*.sarif', recursive=True):
+              carpeta = os.path.basename(os.path.dirname(ruta))
+              with open(ruta) as f:
+                  datos = json.load(f)
+              for i, run in enumerate(datos.get('runs', [])):
+                  herramienta = run['tool']['driver']['name'].lower().replace(' ', '-')
+                  objetivo = next((json.load(open(r))['objetivo'] for r in glob.glob(os.path.dirname(ruta) + '/resumen-*.json')), '.')
+                  run['automationDetails'] = {'id': f'{herramienta}/{objetivo}/{i}/'}
+              destino = 'sarif/' + carpeta + '-' + os.path.basename(ruta)
+              with open(destino, 'w') as f:
+                  json.dump(datos, f)
+              print(destino, [r['automationDetails']['id'] for r in datos.get('runs', [])])
+      - uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        if: hashFiles('sarif/*.sarif') != ''
+        with:
+          sarif_file: sarif
+
+  # Check único para las reglas de rama: verde solo si la puerta final pasa o avisa.
+  resultado:
+    if: always()
+    needs: [politica-ramas, node, java, php, puerta]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: El proyecto declara algo que analizar
+        if: inputs.proyectos-node == '[]' && inputs.proyectos-java == '[]' && inputs.proyectos-php == '[]' && inputs.imagenes == '[]'
+        run: |
+          echo "::error::No hay proyectos ni imágenes: el pipeline no comprobaría nada"
+          exit 1
+      - name: Decisión de la puerta
+        env:
+          DECISION: ${{ needs.puerta.outputs.decision }}
+          CORRECTO: >-
+            ${{ needs.politica-ramas.result == 'success' &&
+            !contains(fromJSON('["failure","cancelled"]'), needs.node.result) &&
+            !contains(fromJSON('["failure","cancelled"]'), needs.java.result) &&
+            !contains(fromJSON('["failure","cancelled"]'), needs.php.result) &&
+            contains(fromJSON('["pasar","avisar"]'), needs.puerta.outputs.decision) }}
+        run: |
+          echo "Decisión de la puerta: ${DECISION:-sin decisión (bloqueó la puerta previa o falló una etapa)}"
+          test "$CORRECTO" = "true"
