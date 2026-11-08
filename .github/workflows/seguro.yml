@@ -532,18 +532,6 @@ jobs:
           set -e
           python3 plantilla/scripts/normalizar.py grype --version 0.121.1 --objetivo "$CONTEXTO" \
             --informe informes/grype.json --codigo "$codigo" --inicio "$inicio" --salida informes/resumen-grype.json
-      - name: Docker Scout (complementario; no interviene en la puerta)
-        if: inputs.modo == 'completo' && env.DOCKERHUB_USUARIO != ''
-        continue-on-error: true
-        uses: docker/scout-action@e7e2a72bf1485d10a58f30696b6c513b261ce4fa # v1.29.0
-        with:
-          command: cves
-          image: local://${{ env.IMAGEN }}
-          dockerhub-user: ${{ secrets.DOCKERHUB_USUARIO }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
-          sarif-file: informes/docker-scout.sarif
-          summary: false
-          write-comment: false
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
