@@ -177,7 +177,9 @@ jobs:
           [ "$SIMULAR" = fallo-herramienta ] && extra="--opcion-inexistente"
           inicio=$(date +%s.%N)
           set +e
-          docker run --rm -v "$PWD/app:/repo" -v "$PWD/informes:/out" "$GITLEAKS" git /repo \
+          # --log-opts=HEAD: solo el historial del commit analizado. Por defecto Gitleaks usa --all,
+          # y fetch-depth: 0 trae todas las ramas remotas, también las de otros cambios.
+          docker run --rm -v "$PWD/app:/repo" -v "$PWD/informes:/out" "$GITLEAKS" git /repo --log-opts=HEAD \
             --redact --exit-code 2 --no-banner --report-format json --report-path /out/gitleaks.json $extra
           codigo=$?
           set -e
@@ -190,7 +192,7 @@ jobs:
         run: |
           inicio=$(date +%s.%N)
           set +e
-          docker run --rm -v "$PWD/app:/repo" "$TRUFFLEHOG" git file:///repo --no-verification --no-update \
+          docker run --rm -v "$PWD/app:/repo" "$TRUFFLEHOG" git file:///repo --branch HEAD --no-verification --no-update \
             --json --fail > informes/trufflehog-crudo.json
           codigo=$?
           set -e
