@@ -18,7 +18,7 @@ L03,politica,secretos,Documentación con TU_TOKEN_AQUI y la clave de ejemplo de 
 L04,politica,dependencias,lodash 4.18.1 (versión corregida de C06),,pasar,,
 L05,politica,imagen,"Dockerfile multietapa, USER node y base con digest",,pasar,,
 L06,politica,secretos,process.env.API_TOKEN en lugar de un valor,,pasar,,
-L07,politica,imagen,FROM nginxinc/nginx-unprivileged:alpine sin USER,,pasar,,
+L07,politica,imagen,FROM nginxinc/nginx-unprivileged:alpine sin USER en la etapa final,,pasar,,
 E01,logica,puerta,Excepción aprobada y vigente sobre C06,R9,pasar,,
 E02,logica,puerta,Excepción sin aprobación sobre C06,R9,bloquear,,
 E03,logica,puerta,Excepción vencida sobre C06,R9,bloquear,,

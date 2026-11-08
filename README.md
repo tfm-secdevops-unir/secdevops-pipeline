@@ -87,7 +87,7 @@ Las herramientas se ejecutan como imágenes de Docker fijadas por versión y dig
 
 ## Evaluación
 
-`evaluacion/catalogo.csv` recoge los 26 casos que se ejecutan en GitHub Actions (20 de política y 6 de lógica de la puerta), con su regla, el resultado esperado y la clave que identifica el problema sembrado en los informes. P01 se comprueba con un informe sintético en `scripts/test_puerta.py`. `evaluacion/ejecutar.py` lanza cada caso con `gh` sobre su rama `caso/<ID>`, en orden aleatorio con semilla, espera la ejecución, descarga el artefacto `evidencias` con su hash y escribe `resultados.csv`.
+`evaluacion/catalogo.csv` recoge los 26 casos que se ejecutan en GitHub Actions (20 de política y 6 de lógica de la puerta), con su regla, el resultado esperado y la clave que identifica el problema sembrado en los informes. P01 se comprueba con un informe sintético en `scripts/test_puerta.py`. `evaluacion/sembrar_casos.py` crea esas ramas sobre la línea base de la aplicación, con un único cambio por caso y secretos ficticios generados con semilla fija. `evaluacion/ejecutar.py` lanza cada caso con `gh` sobre su rama `caso/<ID>`, en orden aleatorio con semilla, espera la ejecución, descarga el artefacto `evidencias` con su hash y escribe `resultados.csv`.
 
 El check obligatorio es `seguro / resultado`. `prueba.yml` ejecuta `seguro.yml` contra los proyectos de `pruebas/` y `scripts/test_puerta.py` comprueba la lógica de la puerta.
 
