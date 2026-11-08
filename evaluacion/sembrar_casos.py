@@ -62,10 +62,10 @@ def dependencia(nombre, version, overrides=None):
 
 
 def excepcion(caduca, solicitante='f4biaan', aprobador='jbroncano'):
-    """Excepción sobre C06: cubre los dos hallazgos de lodash 4.17.20 que bloquean."""
+    """Excepción sobre C06: cubre todos los hallazgos de lodash 4.17.20 (dos bloquean y dos avisan)."""
     dependencia('lodash', '4.17.20')
     entradas = ''
-    for cve in ('CVE-2021-23337', 'CVE-2026-4800'):
+    for cve in ('CVE-2021-23337', 'CVE-2026-4800', 'CVE-2020-28500', 'CVE-2025-13465'):
         entradas += f'  - hallazgo: {cve}:lodash@4.17.20\n    motivo: Caso de lógica de la puerta sobre C06\n'
         entradas += f'    solicitante: {solicitante}\n' if solicitante else ''
         entradas += f'    aprobador: {aprobador}\n' if aprobador else ''
