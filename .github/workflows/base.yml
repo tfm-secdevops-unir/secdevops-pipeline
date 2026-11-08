@@ -46,7 +46,7 @@ permissions:
 
 jobs:
   politica-ramas:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: main solo acepta PR desde release/* o hotfix/*
         if: github.event_name == 'pull_request' && github.base_ref == 'main'
@@ -60,7 +60,7 @@ jobs:
 
   node:
     if: inputs.proyectos-node != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -88,7 +88,7 @@ jobs:
 
   java:
     if: inputs.proyectos-java != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -116,7 +116,7 @@ jobs:
 
   php:
     if: inputs.proyectos-php != '[]'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -136,7 +136,7 @@ jobs:
   docker:
     needs: [politica-ramas, node, java, php]
     if: ${{ !failure() && !cancelled() && inputs.imagenes != '[]' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -151,7 +151,7 @@ jobs:
   resultado:
     if: always()
     needs: [politica-ramas, node, java, php, docker]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: El proyecto declara algo que construir
         if: inputs.proyectos-node == '[]' && inputs.proyectos-java == '[]' && inputs.proyectos-php == '[]' && inputs.imagenes == '[]'
