@@ -583,7 +583,7 @@ jobs:
 
   dast:
     needs: [plantilla, puerta]
-    if: inputs.compose != '' && contains(fromJSON('["pasar","avisar"]'), needs.puerta.outputs.decision)
+    if: ${{ !cancelled() && inputs.compose != '' && contains(fromJSON('["pasar","avisar"]'), needs.puerta.outputs.decision) }}
     runs-on: ubuntu-24.04
     continue-on-error: true
     steps:
